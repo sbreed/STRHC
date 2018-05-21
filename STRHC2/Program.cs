@@ -1,4 +1,4 @@
-﻿//#define STRHC1
+﻿// STRHC1 = Small dataset (40 gestures), !STRHC1 (STRHC2) = Large dataset (300 gestures)
 
 using RHCLib;
 using System;
@@ -14,31 +14,57 @@ namespace STRHC2
     {
         static void Main(string[] args)
         {
-            System.Diagnostics.Process.GetCurrentProcess().PriorityClass = System.Diagnostics.ProcessPriorityClass.High;
+            ParallelStrategy strategy = ParallelStrategy.SingleThreaded;
+            bool bIsLDA = true;
 
-            int nQueuePartitions = 1;
-            int nSlotsPerQueuePartition = 4;
+            RHCLib.DistanceDelegate measure = RHCLib.Vector.EuclideanDistance;
 
-            if (args.Length == 2)
-            {
-                if (!int.TryParse(args[0], out nQueuePartitions) || !int.TryParse(args[1], out nSlotsPerQueuePartition))
-                {
-                    System.Console.WriteLine("Syntax: STRHC.EXE <Queue Partitions> <Slots Per Partition>");
-                    return;
-                }
-            }
+            int nQueuePartitions; // = 2;
+            int nSlotsPerQueuePartition; // = 40;
+            // If using the example, the total queue is 80
 
             string strFile;
-            bool bIsSTRHC1 = false;
+            bool bIsSTRHC1; // STRHC1 = Small dataset (40 gestures), !STRHC1 = Large dataset (300 gestures)
 
-#if STRHC1
-            strFile = @".\Data1.dat";
-            bIsSTRHC1 = true;
-#else
-                strFile = @".\Data.dat";
-#endif
+            #region Parameters
 
-            using (System.IO.StreamWriter sw = new System.IO.StreamWriter(string.Format(@".\{0:yyyy-MM-ddThhmmss} {1} {2}x{3}", DateTime.Now, bIsSTRHC1 ? "STRHC1" : "STRHC2", nQueuePartitions, nSlotsPerQueuePartition), false, Encoding.UTF8))
+            if (args.Length != 5)
+            {
+                System.Console.WriteLine("Syntax: STRHC.EXE <Queue Partitions> <Slots Per Partition> <T|F IsLDA> <T|F IsSingledThreaded> <1 = STRHC1 (40 gestures) | 2 = STRHC2 (300 gestures)>");
+                return;
+            }
+            else
+            {
+                bool singleThreaded;
+                int dataset;
+                if (!int.TryParse(args[0], out nQueuePartitions) || !int.TryParse(args[1], out nSlotsPerQueuePartition) || !bool.TryParse(args[2], out bIsLDA) || !bool.TryParse(args[3], out singleThreaded) || !int.TryParse(args[4], out dataset) || !(new int[] { 1, 2 }.Contains(dataset)))
+                {
+                    System.Console.WriteLine("Syntax: STRHC.EXE <Queue Partitions> <Slots Per Partition> <T|F IsLDA> <T|F IsSingledThreaded> <1 = STRHC1 (40 gestures) | 2 = STRHC2 (300 gestures)>");
+                    return;
+                }
+
+                switch (dataset)
+                {
+                    case 1:
+                        bIsSTRHC1 = true;
+                        strFile = @".\Data1.dat";
+                        break;
+                    case 2:
+                        bIsSTRHC1 = false;
+                        strFile = @".\Data.dat";
+                        break;
+                    default:
+                        throw new NotImplementedException();
+                }
+
+                strategy = singleThreaded ? ParallelStrategy.SingleThreaded : ParallelStrategy.Multithreaded;
+            }
+
+            #endregion
+
+            System.Diagnostics.Process.GetCurrentProcess().PriorityClass = System.Diagnostics.ProcessPriorityClass.High;
+
+            using (System.IO.StreamWriter sw = new System.IO.StreamWriter(string.Format(@".\{0:yyyy-MM-ddTHHmmss} {1} {2}x{3} {4} {5}", DateTime.Now, bIsSTRHC1 ? "STRHC1" : "STRHC2", nQueuePartitions, nSlotsPerQueuePartition, bIsLDA ? "LDA" : "NoLDA", measure == Vector.SquaredEuclideanDistance ? "SqEuc" : "Euc"), false, Encoding.UTF8))
             {
                 Dictionary<int, Tuple<Dictionary<string, List<List<double[]>>>, Dictionary<string, List<List<double[]>>>>> dict;
 
@@ -86,7 +112,6 @@ namespace STRHC2
 
                 #endregion
 
-                RHCLib.DistanceDelegate measure = RHCLib.Vector.SquaredEuclideanDistance;
                 IList<string> classes = dict.Values.First().Item1.Keys.ToList();
                 int nClassCount = classes.Count();
 
@@ -94,7 +119,7 @@ namespace STRHC2
 
                 foreach (KeyValuePair<int, Tuple<List<RHCLib.LabeledVector<string>[]>, List<RHCLib.LabeledVector<string>[]>>> kvp in dictGestures)
                 {
-                    RHCLib.Sphere<string> sphere = RHCLib.Sphere<string>.CreateUnitSphere(measure, nFeatureSpaceDimensionality, string.Empty);
+                    SphereEx<string> sphere = new SphereEx<string>(Sphere<string>.CreateUnitSphere(measure, nFeatureSpaceDimensionality, string.Empty));
 
                     int nEpoch = 1;
                     int nSpawnCount;
@@ -121,7 +146,7 @@ namespace STRHC2
 
                                 double[] biases = sphere.CalculateBiases(lvectorAug, measure, classes);
 
-                                nSpawnCount += sphere.SpawnSingular(lvectorAug, measure, true).Count();
+                                nSpawnCount += sphere.Spawn(lvectorAug, measure, strategy, bIsLDA);
 
                                 Program.AdvanceQueue(queue, biases);
                             }
@@ -147,7 +172,7 @@ namespace STRHC2
                     int nSphereIncorrect = 0;
                     int nQueueCorrect = 0;
                     int nQueueIncorrect = 0;
-
+                    
                     foreach (RHCLib.LabeledVector<string>[] gesture in kvp.Value.Item2)
                     {
                         #region Create Empty Queue
@@ -167,7 +192,7 @@ namespace STRHC2
                         {
                             lvectorAug = Program.CreateAugmentedVector(frame, queue, nQueuePartitions, nSlotsPerQueuePartition);
 
-                            sphereWinner = sphere.Recognize(lvectorAug, measure);
+                            sphereWinner = sphere.Recognize(lvectorAug, measure, strategy);
 
                             double[] rgBiases = sphere.CalculateBiases(lvectorAug, measure, classes);
 
@@ -236,12 +261,41 @@ namespace STRHC2
 
                     #endregion
 
+                    System.Console.Beep();
+                    System.Console.Beep();
+
+                    #region GC Cleanup
+
+                    sphere.Cleanup();
+                    GC.Collect(GC.MaxGeneration);
+                    GC.WaitForPendingFinalizers();
+
+                    // This is where you check the CLR profiler
+
+                    #endregion
+
+                    char key;
+                    do
+                    {
+                        System.Console.WriteLine("Hit 'y' to continue...");
+                        key = System.Console.ReadKey().KeyChar;
+                    } while (key.ToString().ToUpper() != "Y");
+
+                    do
+                    {
+                        System.Console.WriteLine("Hit 'y' AGAIN to continue...");
+                        key = System.Console.ReadKey().KeyChar;
+                    } while (key.ToString().ToUpper() != "Y");
+
                     #region Serialize Sphere
 
-                    using (System.IO.FileStream fs = new System.IO.FileStream(string.Format(@".\{0}-{1}-{2}-{3}.serialized", bIsSTRHC1 ? "STRHC1" : "STRHC2", nQueuePartitions, nSlotsPerQueuePartition, kvp.Key), System.IO.FileMode.Create))
+                    if (false)
                     {
-                        BinaryFormatter bf = new BinaryFormatter();
-                        bf.Serialize(fs, sphere);
+                        using (System.IO.FileStream fs = new System.IO.FileStream(string.Format(@".\{0}-{1}-{2}-{3}.serialized", bIsSTRHC1 ? "STRHC1" : "STRHC2", nQueuePartitions, nSlotsPerQueuePartition, kvp.Key), System.IO.FileMode.Create))
+                        {
+                            BinaryFormatter bf = new BinaryFormatter();
+                            bf.Serialize(fs, sphere);
+                        }
                     }
 
                     #endregion
@@ -313,7 +367,10 @@ namespace STRHC2
             sw.Flush(); // Flush the stream, so I can open it in Notepad and view progress even though the stream is still open
 
             // Mirror
-            System.Diagnostics.Debug.WriteLine(value);
+            //System.Diagnostics.Debug.WriteLine(value);
+
+            // Mirror to console
+            System.Console.WriteLine(value);
         }
     }
 
@@ -330,8 +387,162 @@ namespace STRHC2
             double fProportion = 1.0;
             int nCount = dictClasses.Count;
             bool bFirstSphere = true;
+            SphereEx<L> sphLDA;
 
-            RHCLib.Sphere<L> sphereIteration = sphere.Recognize(vector, measure, true);
+            RHCLib.Sphere<L> sphereIteration = sphere.Recognize(vector, measure, ParallelStrategy.SingleThreaded);
+            while (sphereIteration != null && fProportion > 0.0 && nCount > 0)
+            {
+                if (bFirstSphere)
+                {
+                    if (dictClasses.ContainsKey(sphereIteration.Label))
+                    {
+                        if ((sphLDA = sphereIteration as SphereEx<L>) != null && sphLDA.DiscriminantEx != null)
+                        {
+                            #region LDA (Uses LDAEx)
+
+                            // You have four cases you need to watch for...
+
+
+                            //          /|\                /|\           1.0
+                            //         / | \              / | \
+                            //        /  |  \            /  |  \
+                            //       /   |   \          /   |   \
+                            //      /    |    \        /    |    \
+                            //     /     |     \      /     |     \
+                            //    /      |      \    /      |      \
+                            //   /       |       \  /       |       \
+                            //  /        |        \/        |        \
+                            // |---------M---------D--------M---------|  0.5
+
+                            // Equation: 1 - (h)(x_i)        <-- 1 = fProportion because haven't gotten out yet
+
+                            Func<double, double, double> slope = (x1, x2) =>
+                            {
+                                return 0.5 / Math.Abs(x2 - x1);
+                            };
+
+                            //double[][] data = LDA.MatrixFromVector(vector.Features);
+                            //double[][] wTx = LDA.MatrixProduct(sphLDA.Discriminant.Transposed, data);    // Project the data
+
+                            double proj = Accord.Math.Matrix.Dot(sphLDA.DiscriminantEx.ProjectionVector, vector.Features);
+
+                            if (proj <= sphLDA.DiscriminantEx.ProjectedLeftMean)
+                            {
+                                dictClasses[sphLDA.Label] = fProportion - (slope(sphLDA.DiscriminantEx.ProjectedLeftMean, sphLDA.DiscriminantEx.ProjectedSetMean - sphLDA.Radius) * (sphLDA.DiscriminantEx.ProjectedLeftMean - proj));
+                            }
+                            else if (proj > sphLDA.DiscriminantEx.ProjectedLeftMean && proj <= sphLDA.DiscriminantEx.ProjectedSetMean)
+                            {
+                                dictClasses[sphLDA.Label] = fProportion - (slope(sphLDA.DiscriminantEx.ProjectedSetMean, sphLDA.DiscriminantEx.ProjectedLeftMean) * (proj - sphLDA.DiscriminantEx.ProjectedLeftMean));
+                            }
+                            else if (proj > sphLDA.DiscriminantEx.ProjectedSetMean && proj <= sphLDA.DiscriminantEx.ProjectedRightMean)
+                            {
+                                dictClasses[sphLDA.Label] = fProportion - (slope(sphLDA.DiscriminantEx.ProjectedRightMean, sphLDA.DiscriminantEx.ProjectedSetMean) * (sphLDA.DiscriminantEx.ProjectedRightMean - proj));
+                            }
+                            else
+                            {
+                                dictClasses[sphLDA.Label] = fProportion - (slope(sphLDA.DiscriminantEx.ProjectedSetMean + sphLDA.Radius, sphLDA.DiscriminantEx.ProjectedRightMean) * (proj - sphLDA.DiscriminantEx.ProjectedRightMean));
+                            }
+
+                            #endregion
+                        }
+                        else if (sphLDA != null && sphLDA.Discriminant != null)
+                        {
+                            #region Old LDA
+
+                            // You have four cases you need to watch for...
+
+
+                            //          /|\                /|\           1.0
+                            //         / | \              / | \
+                            //        /  |  \            /  |  \
+                            //       /   |   \          /   |   \
+                            //      /    |    \        /    |    \
+                            //     /     |     \      /     |     \
+                            //    /      |      \    /      |      \
+                            //   /       |       \  /       |       \
+                            //  /        |        \/        |        \
+                            // |---------M---------D--------M---------|  0.5
+
+                            // Equation: 1 - h(x_i)
+
+                            Func<double, double, double> slope = (x1, x2) =>
+                            {
+                                return 0.5 / Math.Abs(x2 - x1);
+                            };
+
+                            double[][] data = LDA.MatrixFromVector(vector.Features);
+                            double[][] wTx = LDA.MatrixProduct(sphLDA.Discriminant.Transposed, data);    // Project the data
+                            if (wTx[0][0] <= sphLDA.Discriminant.ProjectedMeanLeft)
+                            {
+                                dictClasses[sphLDA.Label] = fProportion - (slope(sphLDA.Discriminant.ProjectedMeanLeft, 0.0) * (sphLDA.Discriminant.ProjectedMeanLeft - wTx[0][0]));
+                            }
+                            else if (wTx[0][0] > sphLDA.Discriminant.ProjectedMeanLeft && wTx[0][0] <= sphLDA.Discriminant.DecisionPoint)
+                            {
+                                dictClasses[sphLDA.Label] = fProportion - (slope(sphLDA.Discriminant.DecisionPoint, sphLDA.Discriminant.ProjectedMeanLeft) * (wTx[0][0] - sphLDA.Discriminant.ProjectedMeanLeft));
+                            }
+                            else if (wTx[0][0] > sphLDA.Discriminant.DecisionPoint && wTx[0][0] <= sphLDA.Discriminant.ProjectMeanRight)
+                            {
+                                dictClasses[sphLDA.Label] = fProportion - (slope(sphLDA.Discriminant.ProjectMeanRight, sphLDA.Discriminant.DecisionPoint) * (sphLDA.Discriminant.ProjectMeanRight - wTx[0][0]));
+                            }
+                            else
+                            {
+                                dictClasses[sphLDA.Label] = fProportion - (slope(2 * sphLDA.Radius, sphLDA.Discriminant.ProjectMeanRight) * (wTx[0][0] - sphLDA.Discriminant.ProjectMeanRight));
+                            }
+
+                            #endregion
+                        }
+                        else
+                        {
+                            #region Linear
+
+                            dictClasses[sphereIteration.Label] = fProportion - (measure(sphereIteration, vector) * (0.5 / sphereIteration.Radius));
+
+                            #endregion
+                        }
+
+                        fProportion -= dictClasses[sphereIteration.Label].Value;
+
+                        bFirstSphere = false;
+                        nCount--;
+                    }
+                }
+                else
+                {
+                    if (dictClasses.ContainsKey(sphereIteration.Label) && !dictClasses[sphereIteration.Label].HasValue)
+                    {
+                        dictClasses[sphereIteration.Label] = fProportion;
+                        nCount--;
+                    }
+
+                    #region Linear
+
+                    // Impossible to have LDA in node that's not a leaf.
+                    fProportion -= fProportion * ((sphereIteration.Radius - measure(sphereIteration, vector)) / sphereIteration.Radius);
+
+                    #endregion
+                }
+
+                sphereIteration = sphereIteration.Parent;
+            }
+
+            double fSum = dictClasses.Values.Sum(v => v.HasValue ? v.Value : 0.0);
+
+            return dictClasses.Values.Select(v => v.HasValue ? v.Value / fSum : 0.0).ToArray();
+        }
+
+        public static double[] CalculateBiases_Old<L>(this Sphere<L> sphere, Vector vector, RHCLib.DistanceDelegate measure, IList<L> labels)
+        {
+            SortedDictionary<L, double?> dictClasses = new SortedDictionary<L, double?>();
+            foreach (L label in labels)
+            {
+                dictClasses.Add(label, null);
+            }
+
+            double fProportion = 1.0;
+            int nCount = dictClasses.Count;
+            bool bFirstSphere = true;
+
+            RHCLib.Sphere<L> sphereIteration = sphere.Recognize(vector, measure, ParallelStrategy.SingleThreaded);
             while (sphereIteration != null && fProportion > 0.0 && nCount > 0)
             {
                 if (bFirstSphere)
